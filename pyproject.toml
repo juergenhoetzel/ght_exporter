@@ -1,0 +1,25 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "ght_exporter"
+authors = [{name = "Jürgen Hötzel", email = "juergen@hoetzel.info"}]
+license = {file = "LICENSE"}
+classifiers = ["License :: OSI Approved :: MIT License"]
+dynamic = ["version", "description"]
+dependencies = ["PyGObject", "prometheus-client"]
+[project.optional-dependencies]
+dev = [
+    "pyright",
+    "PyGObject-stubs"
+]
+
+[project.urls]
+Home = "https://github.com/juergenhoetzel/ght_exporter"
+
+[project.scripts]
+ght_exporter = "ght_exporter.main:main"
+
+[tool.isort]
+profile = "black"
