@@ -18,6 +18,7 @@ class GoveeTempExporter:
     humidity: Gauge
     battery: Gauge
     _dbus_connection: Gio.DBusConnection
+    _adapter_proxy: Gio.DBusProxy
 
     def _get_adapterpaths(self) -> list[str]:
         mgr_proxy = Gio.DBusProxy.new_sync(
@@ -29,15 +30,31 @@ class GoveeTempExporter:
             "org.freedesktop.DBus.ObjectManager",
         )
         mngd_objs = mgr_proxy.GetManagedObjects()  # type: ignore
-        return [obj_path for obj_path, obj_data in mngd_objs.items() if obj_data.get("org.bluez.Adapter1", {}).get("Powered")]
+        return [
+            obj_path
+            for obj_path, obj_data in mngd_objs.items()
+            if obj_data.get("org.bluez.Adapter1", {}).get("Powered")
+        ]
 
     def __init__(self):
         "Govee temperature prometheus exporter"
 
-        self.temperature = Gauge("govee_temperature_degree", "Temperature in ℃", ["alias", "name", "address"])
-        self.humidity = Gauge("govee_humidity_percent", "Humidity in percent", ["alias", "name", "address"])
-        self.battery = Gauge("govee_battery_percent", "Battery in percent", ["alias", "name", "address"])
-        self.rssi = Gauge("govee_rssi_dbm", "Received Signal Strength Indication (dBm)", ["alias", "name", "address"])
+        self.temperature = Gauge(
+            "govee_temperature_degree", "Temperature in ℃", ["alias", "name", "address"]
+        )
+        self.humidity = Gauge(
+            "govee_humidity_percent",
+            "Humidity in percent",
+            ["alias", "name", "address"],
+        )
+        self.battery = Gauge(
+            "govee_battery_percent", "Battery in percent", ["alias", "name", "address"]
+        )
+        self.rssi = Gauge(
+            "govee_rssi_dbm",
+            "Received Signal Strength Indication (dBm)",
+            ["alias", "name", "address"],
+        )
         self._dbus_connection = Gio.bus_get_sync(Gio.BusType.SYSTEM)
 
     def signal_callback(
@@ -68,31 +85,66 @@ class GoveeTempExporter:
             batt = int(data[5] & 0x7F)
             err = bool(data[5] & 0x80)
             if not err:
-                log.info(f"{alias}: Temperature: {temp}℃ , Humidity: {hum}%, Battery: {batt}%")
-                self.temperature.labels(alias=alias, name=name, address=address).set(temp)
+                log.info(
+                    f"{alias}: Temperature: {temp}℃ , Humidity: {hum}%, Battery: {batt}%"
+                )
+                self.temperature.labels(alias=alias, name=name, address=address).set(
+                    temp
+                )
                 self.humidity.labels(alias=alias, name=name, address=address).set(hum)
                 self.battery.labels(alias=alias, name=name, address=address).set(batt)
                 self.rssi.labels(alias=alias, name=name, address=address).set(rssi)
 
-    def bluez_appeared(self, conn: Gio.DBusConnection, name: str, _):
+    def _ble_scan_timer(self):
+        if (
+            discovering_prop := self._adapter_proxy.get_cached_property("Discovering")
+        ) and discovering_prop.unpack():
+            log.debug("Already Discovering")
+        else:
+            logging.debug("Starting discovery")
+            self._adapter_proxy.SetDiscoveryFilter("(a{sv})", {"UUIDs": GLib.Variant("as", [GOVEE_UUID])})  # type: ignore
+            self._adapter_proxy.StartDiscovery()  # type: ignore
+        return True
+
+    def bluez_appeared(
+        self, conn: Gio.DBusConnection, name: str, _
+    ):  # FIXME: Handle bluez_disappeared
         log.debug("'org.bluez' is available")
         if not (adapter_paths := self._get_adapterpaths()):
             log.critical("No bluetooth adapter available")
             return
-        log.debug(f"Using first bluetooth adapter {adapter_paths[0]}")  # Fixme: Option, when multiple adapters?
-        adapter_proxy: Gio.DBusProxy = Gio.DBusProxy.new_sync(self._dbus_connection, Gio.DBusProxyFlags.NONE, None, "org.bluez", adapter_paths[0], "org.bluez.Adapter1")
-
-        logging.debug(f"Starting discovery on {adapter_paths[0]}")
-        adapter_proxy.SetDiscoveryFilter("(a{sv})", {"UUIDs": GLib.Variant("as", [GOVEE_UUID])})  # type: ignore
-        adapter_proxy.StartDiscovery()  # type: ignore
-        conn.signal_subscribe(name, None, None, None, None, Gio.DBusSignalFlags.NONE, self.signal_callback)
+        log.debug(
+            f"Using first bluetooth adapter {adapter_paths[0]}"
+        )  # Fixme: Option, when multiple adapters?
+        self._adapter_proxy = Gio.DBusProxy.new_sync(
+            self._dbus_connection,
+            Gio.DBusProxyFlags.NONE,
+            None,
+            "org.bluez",
+            adapter_paths[0],
+            "org.bluez.Adapter1",
+        )
+        conn.signal_subscribe(
+            name, None, None, None, None, Gio.DBusSignalFlags.NONE, self.signal_callback
+        )
+        self._ble_scan_timer()  # first scan
+        GLib.timeout_add_seconds(60, self._ble_scan_timer)  # enable rescanning
 
     def start(self):
-        watcher_id = Gio.bus_watch_name_on_connection(self._dbus_connection, "org.bluez", Gio.BusNameWatcherFlags.NONE, self.bluez_appeared, None)
+        watcher_id = Gio.bus_watch_name_on_connection(
+            self._dbus_connection,
+            "org.bluez",
+            Gio.BusNameWatcherFlags.NONE,
+            self.bluez_appeared,
+            None,
+        )
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="govee_temp_exporter", description="Govee Bluetooth Low Energy Temperature and Humidity exporter")
+    parser = argparse.ArgumentParser(
+        prog="govee_temp_exporter",
+        description="Govee Bluetooth Low Energy Temperature and Humidity exporter",
+    )
     loglevels = {
         "DEBUG": logging.debug,
         "INFO": logging.info,
@@ -107,7 +159,9 @@ def main():
         help="log level; one of: CRITICAL, ERROR, WARNING, INFO, DEBUG",
         default="WARNING",
     )
-    parser.add_argument("-p", "--port", help="Port on which to expose metrics", type=int, default="8080")
+    parser.add_argument(
+        "-p", "--port", help="Port on which to expose metrics", type=int, default="8080"
+    )
     args = parser.parse_args(sys.argv[1:])
 
     logging.basicConfig(
@@ -119,7 +173,8 @@ def main():
     start_http_server(args.port)
     ge = GoveeTempExporter()
     ge.start()
-    GLib.MainLoop().run()
+    m = GLib.MainLoop()
+    m.run()
 
 
 if __name__ == "__main__":
