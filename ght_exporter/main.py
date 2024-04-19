@@ -96,14 +96,20 @@ class GoveeTempExporter:
                 self.rssi.labels(alias=alias, name=name, address=address).set(rssi)
 
     def _ble_scan_timer(self):
-        if (
-            discovering_prop := self._adapter_proxy.get_cached_property("Discovering")
-        ) and discovering_prop.unpack():
-            log.debug("Already Discovering")
-        else:
-            logging.debug("Starting discovery")
+        try:
             self._adapter_proxy.SetDiscoveryFilter("(a{sv})", {"UUIDs": GLib.Variant("as", [GOVEE_UUID])})  # type: ignore
             self._adapter_proxy.StartDiscovery()  # type: ignore
+            logging.debug("Starting discovery")
+        except GLib.GError as e:  # type: ignore
+            if (
+                e.domain == "g-io-error-quark"
+                and e.code == Gio.IOErrorEnum.DBUS_ERROR
+                and Gio.dbus_error_get_remote_error(e) == "org.bluez.Error.InProgress"  # type: ignore
+            ):
+                log.debug("Already Discovering")
+
+            else:
+                raise
         return True
 
     def bluez_appeared(
