@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import sys
 
 import gi
@@ -172,7 +173,11 @@ def main():
 
     logging.basicConfig(
         level=args.loglevel,
-        format="%(asctime)s %(levelname)-8s %(message)s",
+        format=(
+            "%(levelname)-8s %(message)s"
+            if os.environ.get("JOURNAL_STREAM")
+            else "%(asctime)s %(levelname)-8s %(message)s"
+        ),
     )
 
     # Start up the server to expose the metrics.
